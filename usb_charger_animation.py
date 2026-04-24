@@ -1,14 +1,13 @@
 """
-スケルトンUSB充電器 回路シミュレーション（アニメーション付き・改善版）
-=============================================================
+スケルトンUSB充電器 回路シミュレーション（重い版・波形が伸びるアニメ付き）
+============================================================================
 対応内容:
-1. 日本語文字化け対策
-2. 文字重なりの抑制
-3. グラフ軸の修正
-4. どこの電圧・電流かを明確化
-5. JIS風の簡易回路図を追加
-6. 重さを少し軽減
-7. アニメーション表示
+- 日本語フォント自動検出
+- 文字重なりを抑えたレイアウト
+- グラフはフレームごとに波形そのものが伸びる
+- 測定点・ノード名を明確化
+- 簡易JIS風回路図を追加
+- GIF保存
 """
 
 import os
@@ -20,14 +19,13 @@ import matplotlib
 try:
     matplotlib.use("TkAgg", force=True)
 except Exception as e:
-    print(f"[警告] TkAgg に切り替えられませんでした: {e}")
-    print("GUI表示が出ない場合があります。")
+    print(f"[警告] TkAgg に切り替えできませんでした: {e}")
 
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
 import matplotlib.font_manager as fm
 from matplotlib.patches import FancyBboxPatch, Circle, Polygon, Arc
-from matplotlib.animation import FuncAnimation
+from matplotlib.animation import FuncAnimation, PillowWriter
 
 warnings.filterwarnings("ignore")
 
@@ -77,16 +75,15 @@ LIME    = "#C5E99B"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
 OUT_CKT = os.path.join(BASE_DIR, "usb_charger_circuit_diagram_jis.png")
 OUT_PNG = os.path.join(BASE_DIR, "usb_charger_all_graphs_first_frame.png")
+OUT_GIF = os.path.join(BASE_DIR, "usb_charger_all_graphs_waveform.gif")
 
-# GIF保存は重いので必要時だけ True にする
-SAVE_GIF = False
-OUT_GIF = os.path.join(BASE_DIR, "usb_charger_all_graphs.gif")
+SAVE_GIF = True
 
 # ============================================================
 # シミュレーション条件
 # ============================================================
-FS      = 200_000
-T_SIM   = 0.05
+FS      = 120_000     # 軽量化
+T_SIM   = 0.04
 t       = np.linspace(0, T_SIM, int(FS * T_SIM), endpoint=False)
 dt      = t[1] - t[0]
 
@@ -236,14 +233,15 @@ v_drain = v_bulk * (1 - sw_signal) + sw_signal * 0.5
 err_ic = V_OUT - (v_out1 + v_out2) / 2
 duty = np.clip(0.3 + np.cumsum(err_ic) * dt * 8, 0.05, 0.8)
 
-# NTC
+# NTC / FB
 T_ntc = np.clip(25.0 + (i_primary**2 * R["R3"] * 0.001).cumsum() * dt * 8e3, 25, 80)
 R_ntc = R["R3"] * np.exp(3950 * (1 / (T_ntc + 273.15) - 1 / 298.15))
+v_fb = v_R["R5"]
 
 # ============================================================
 # 間引き
 # ============================================================
-STEP = 100
+STEP = 80
 ts = t[::STEP] * 1000  # ms
 
 def ds(arr):
@@ -285,13 +283,13 @@ def style_ax(ax, title, ylabel, xlabel=None, show_xlabels=False):
 def mark_meas(ax, text, color=GOLD):
     ax.text(
         0.98, 0.96, text, transform=ax.transAxes,
-        ha="right", va="top", fontsize=6.2, color=color,
+        ha="right", va="top", fontsize=6.1, color=color,
         bbox=dict(facecolor="#1C2128", edgecolor=color, lw=0.6, boxstyle="round,pad=0.18"),
         zorder=10
     )
 
 # ============================================================
-# JIS風簡易回路図
+# 回路図用の図形
 # ============================================================
 def draw_box(ax, x, y, w, h, label, sublabel="", color="#264653", alpha=0.88):
     rect = FancyBboxPatch(
@@ -339,8 +337,15 @@ def draw_diode(ax, x1, x2, y, color=WHITE, lw=1.2):
     ax.plot([x1 - 0.05, x1], [y, y], color=color, lw=lw)
     ax.plot([xm + 0.03, x2], [y, y], color=color, lw=lw)
 
-fig_ckt = plt.figure(figsize=(22, 11), facecolor=BG)
-ax_ckt = fig_ckt.add_subplot(111)
+# ============================================================
+# Figure 1: 回路図（上: 図 / 下: 補足）
+# ============================================================
+fig_ckt = plt.figure(figsize=(22, 13), facecolor=BG)
+gs_ckt = gridspec.GridSpec(2, 1, figure=fig_ckt, height_ratios=[5.2, 1.25], hspace=0.08)
+
+ax_ckt = fig_ckt.add_subplot(gs_ckt[0])
+ax_note = fig_ckt.add_subplot(gs_ckt[1])
+
 ax_ckt.set_facecolor(BG)
 ax_ckt.set_xlim(0, 24)
 ax_ckt.set_ylim(0, 10)
@@ -350,15 +355,18 @@ ax_ckt.set_title(
     color=WHITE, fontsize=13, fontweight="bold", pad=12
 )
 
+# GND
 ax_ckt.plot([0.5, 23.4], [1.0, 1.0], color=GRAY, lw=1.0, ls="--")
 ax_ckt.text(0.2, 1.0, "GND", color=GRAY, fontsize=8, va="center")
 
+# AC source
 draw_box(ax_ckt, 0.5, 3.9, 1.8, 2.1, "AC電源", "100V / 60Hz", color="#444444")
 ax_ckt.add_patch(Circle((1.4, 4.95), 0.42, fill=False, ec=WHITE, lw=1.1))
 ax_ckt.text(1.4, 4.95, "~", color=WHITE, ha="center", va="center", fontsize=12, fontweight="bold")
 ax_ckt.plot([2.3, 3.0], [5.6, 5.6], color=WHITE, lw=1.2)
 ax_ckt.plot([2.3, 3.0], [4.3, 4.3], color=WHITE, lw=1.2)
 
+# EMI
 draw_resistor(ax_ckt, 3.0, 4.0, 5.6, amp=0.11, color=CORAL)
 ax_ckt.text(3.5, 5.95, "R3 NTC", color=CORAL, fontsize=7, ha="center")
 ax_ckt.plot([4.0, 4.6], [5.6, 5.6], color=WHITE, lw=1.2)
@@ -375,6 +383,7 @@ ax_ckt.text(7.15, 4.95, "C8", color=LIME, fontsize=7, ha="left")
 ax_ckt.plot([7.4, 8.0], [5.6, 5.6], color=WHITE, lw=1.2)
 ax_ckt.text(5.6, 7.25, "EMIフィルタ", color=MINT, fontsize=8, ha="center")
 
+# Rectifier
 draw_box(ax_ckt, 8.0, 4.0, 2.0, 2.6, "整流ブリッジ", "D1/D2 等価", color="#5C4A8A")
 draw_diode(ax_ckt, 8.3, 9.7, 5.8, color=WHITE)
 draw_diode(ax_ckt, 8.3, 9.7, 4.8, color=WHITE)
@@ -383,10 +392,12 @@ ax_ckt.plot([10.0, 10.6], [5.6, 5.6], color=WHITE, lw=1.2)
 ax_ckt.text(10.4, 5.95, "DC+", color=WHITE, fontsize=7)
 ax_ckt.text(10.4, 4.55, "DC-", color=WHITE, fontsize=7)
 
+# Bulk cap
 draw_capacitor(ax_ckt, 10.6, 5.6, 1.0, color=SKY)
 ax_ckt.text(10.8, 4.95, "C2 330µF", color=SKY, fontsize=7, ha="left")
 ax_ckt.text(11.2, 6.15, "DCバス", color=SKY, fontsize=8, ha="center")
 
+# Flyback
 draw_box(ax_ckt, 12.0, 3.8, 3.0, 3.0, "T1 + Q1", "フライバック", color="#3D5A3E")
 draw_inductor(ax_ckt, 12.3, 13.3, 5.9, n=3, color=WHITE)
 draw_inductor(ax_ckt, 14.2, 15.2, 5.2, n=3, color=WHITE)
@@ -419,337 +430,228 @@ ax_ckt.text(18.9, 6.15, "二次整流", color=MINT, fontsize=8, ha="center")
 draw_box(ax_ckt, 12.0, 6.95, 2.2, 0.9, "スナバ", "R10 + C3 + D5", color="#6B4E2A")
 ax_ckt.text(13.1, 7.35, "スパイク吸収", color="black", fontsize=6.8, ha="center")
 
+# 補足欄（重ならないように4分割）
+ax_note.set_facecolor(BG)
+ax_note.set_xlim(0, 100)
+ax_note.set_ylim(0, 100)
+ax_note.axis("off")
+
+def note_box(ax, x, y, w, h, title, body, edgecolor):
+    patch = FancyBboxPatch(
+        (x, y), w, h, boxstyle="round,pad=0.4",
+        facecolor="#11161C", edgecolor=edgecolor, linewidth=1.0
+    )
+    ax.add_patch(patch)
+    ax.text(x + 2, y + h - 6, title, color=WHITE, fontsize=9, fontweight="bold", va="top")
+    ax.text(x + 2, y + h - 14, body, color=WHITE, fontsize=7.4, va="top", linespacing=1.35)
+
+note_box(
+    ax_note, 1, 8, 24, 84,
+    "測定点",
+    "① AC入力 (v_ac)\n② EMI後電圧 (v_emi)\n③ 整流後電圧 (v_rect)\n④ DCバス電圧 (v_bulk)\n⑤ 一次電流 (i_primary)\n⑥ 二次側電圧 (v_sec_raw)\n⑦ MOSFET Vgs / Vds\n⑧ PWM Duty\n⑨ FB電圧\n⑩ D3/D4電流\n⑪ USB出力1\n⑫ USB出力2",
+    GOLD
+)
+note_box(
+    ax_note, 26, 8, 23, 84,
+    "推定仕様",
+    "入力: AC100V / 60Hz\n出力: USB-A ×2\nPort1: 5V / 1.2A\nPort2: 5V / 1.0A\nスイッチング周波数: 約65kHz\n出力はフライバック方式の推定",
+    MINT
+)
+note_box(
+    ax_note, 51, 8, 22, 84,
+    "主要部品",
+    "R1-R12\nC1-C8\nL1-L3\nD1-D5\nQ1: MOSFET\nU3: PWMコントローラ\nT1: フライバックトランス",
+    SKY
+)
+note_box(
+    ax_note, 75, 8, 24, 84,
+    "補足",
+    "この図は推定回路です。\n実機とは異なる可能性があります。\n記号・定数はシミュレーション用の近似です。",
+    ROSE
+)
+
 fig_ckt.tight_layout()
-fig_ckt.savefig(OUT_CKT, dpi=160, bbox_inches="tight", facecolor=BG)
+fig_ckt.savefig(OUT_CKT, dpi=150, bbox_inches="tight", facecolor=BG)
 plt.close(fig_ckt)
 
 # ============================================================
-# グラフ
+# Graph figure: 波形が伸びるアニメ
 # ============================================================
-fig = plt.figure(figsize=(26, 42), facecolor=BG)
+fig = plt.figure(figsize=(20, 34), facecolor=BG)
 fig.suptitle(
-    "スケルトンUSB充電器 回路シミュレーション（改善版）\n"
+    "スケルトンUSB充電器 回路シミュレーション（重い版）\n"
     "AC100V/60Hz → EMI → 整流 → フライバック → USB-A×2",
-    color=WHITE, fontsize=15, fontweight="bold", y=0.993
+    color=WHITE, fontsize=14, fontweight="bold", y=0.988
 )
 
 gs = gridspec.GridSpec(
-    12, 4, figure=fig,
-    hspace=0.78, wspace=0.38,
-    top=0.975, bottom=0.02, left=0.05, right=0.985
+    6, 2, figure=fig,
+    hspace=0.62, wspace=0.26,
+    top=0.93, bottom=0.03, left=0.05, right=0.985
 )
 
-axes_all = []
+animated = []
 
-# Row 0: メイン波形
+def add_anim_line(ax, x, y, **kwargs):
+    (line,) = ax.plot([], [], **kwargs)
+    animated.append((line, x, y))
+    return line
+
+# 1) 主要フロー
 ax0 = fig.add_subplot(gs[0, :])
-style_ax(ax0, "主要電圧フロー\n[測定点: ①AC入力 → ②EMI後 → ③整流後 → ④DCバス]", "電圧 [V]")
-ax0.plot(ts, ds(v_ac),   color=CORAL, lw=1.2, label="v_ac  [① AC入力]")
-ax0.plot(ts, ds(v_emi),  color=GOLD,  lw=1.1, label="v_emi [② EMI後]", alpha=0.9)
-ax0.plot(ts, ds(v_rect), color=TEAL,  lw=1.1, label="v_rect [③ 整流後]", alpha=0.9)
-ax0.plot(ts, ds(v_bulk), color=MINT,  lw=1.3, label="v_bulk [④ DCバス]")
-ax0.set_ylim(*data_limits(ds(v_ac), ds(v_emi), ds(v_rect), ds(v_bulk), pad=0.15))
-ax0.legend(loc="upper right", fontsize=7.3, facecolor="#1C2128", labelcolor=WHITE, ncol=2, framealpha=0.92)
-mark_meas(ax0, "測定点①②③④")
-axes_all.append(ax0)
+style_ax(ax0, "主要電圧フロー\n[①AC入力 → ②EMI後 → ③整流後 → ④DCバス → ⑪/⑫USB出力]", "電圧 [V]")
+ax0.set_xlim(ts[0], ts[-1])
+ax0.set_ylim(*data_limits(ds(v_ac), ds(v_emi), ds(v_rect), ds(v_bulk), ds(v_out1)*20, ds(v_out2)*20, pad=0.12))
+add_anim_line(ax0, ts, ds(v_ac),   color=CORAL, lw=1.15, label="v_ac [① AC入力]")
+add_anim_line(ax0, ts, ds(v_emi),  color=GOLD,  lw=1.05, label="v_emi [② EMI後]")
+add_anim_line(ax0, ts, ds(v_rect), color=TEAL,  lw=1.05, label="v_rect [③ 整流後]")
+add_anim_line(ax0, ts, ds(v_bulk), color=MINT,  lw=1.15, label="v_bulk [④ DCバス]")
+add_anim_line(ax0, ts, ds(v_out1) * 20, color=SKY, lw=1.0, label="v_out1×20 [⑪]")
+add_anim_line(ax0, ts, ds(v_out2) * 20, color=ROSE, lw=1.0, label="v_out2×20 [⑫]")
+ax0.legend(loc="upper right", fontsize=7.0, facecolor="#1C2128", labelcolor=WHITE, ncol=3, framealpha=0.92)
+mark_meas(ax0, "測定点①②③④⑪⑫")
 
-# Row 1-3: 抵抗
-R_info = {
-    "R1": "R1 (1MΩ)\nAC入力ブリーダー上側\n測定: L–GND間",
-    "R2": "R2 (1MΩ)\nAC入力ブリーダー下側\n測定: N–GND間",
-    "R3": "R3 / NTC (10Ω)\n突入電流制限\n測定: ①NTC両端",
-    "R4": "R4 (47kΩ)\nFB分圧 上側\n測定: ⑨FB–Vout",
-    "R5": "R5 (10kΩ)\nFB分圧 下側\n測定: ⑨FB–GND",
-    "R6": "R6 (1Ω)\nMOSFETゲート抵抗\n測定: Gate–IC",
-    "R7": "R7 (100kΩ)\nソフトスタート\n測定: Cssノード",
-    "R8": "R8 (22Ω)\n電流検出抵抗\n測定: ⑤Q1ソース–GND",
-    "R9": "R9 (4.7kΩ)\nバイアス抵抗\n測定: VCC–FB",
-    "R10": "R10 (100Ω)\nスナバ抵抗\n測定: スナバ両端",
-    "R11": "R11 (10Ω)\n出力ダンピング P1\n測定: ⑪C6–USB端子",
-    "R12": "R12 (10Ω)\n出力ダンピング P2\n測定: ⑫C7–USB端子",
-}
-R_cols = [CORAL, GOLD, TEAL, MINT, PLUM, SKY, ROSE, LIME, CORAL, GOLD, TEAL, MINT]
-for idx, rk in enumerate(R.keys()):
-    row = 1 + idx // 4
-    col = idx % 4
-    ax = fig.add_subplot(gs[row, col])
-    style_ax(ax, R_info[rk], "電圧 [V]")
-    y = ds(v_R[rk])
-    ax.plot(ts, y, color=R_cols[idx], lw=1.0)
-    ax.fill_between(ts, y, color=R_cols[idx], alpha=0.11)
-    ax.set_ylim(*data_limits(y, pad=0.18))
-    ax2 = ax.twinx()
-    iy = ds(i_R[rk]) * 1000
-    ax2.plot(ts, iy, color=R_cols[idx], lw=0.7, ls=":", alpha=0.65)
-    ax2.set_ylabel("電流 [mA]", color=GRAY, fontsize=6)
-    ax2.tick_params(colors=GRAY, labelsize=6)
-    for sp in ax2.spines.values():
-        sp.set_color(BORDER)
-    mark_meas(ax, f"測定点: {rk}")
-    axes_all.append(ax)
+# 2) 抵抗 R1-R6
+ax_r1 = fig.add_subplot(gs[1, 0])
+style_ax(ax_r1, "抵抗群 R1-R6\n測定: 各抵抗両端電圧", "電圧 [V]")
+ax_r1.set_xlim(ts[0], ts[-1])
+ax_r1.set_ylim(*data_limits(*[ds(v_R[k]) for k in ["R1", "R2", "R3", "R4", "R5", "R6"]], pad=0.15))
+for rk, col in zip(["R1", "R2", "R3", "R4", "R5", "R6"], [CORAL, GOLD, TEAL, MINT, PLUM, SKY]):
+    add_anim_line(ax_r1, ts, ds(v_R[rk]), color=col, lw=0.9, label=rk)
+ax_r1.legend(fontsize=6.6, ncol=3, facecolor="#1C2128", labelcolor=WHITE)
 
-# Row 4: コンデンサ電圧
-C_cols = [CORAL, TEAL, GOLD, MINT, PLUM, SKY, ROSE, LIME]
-C_titles = {
-    "C1": "C1 (0.1µF)\nCX EMIコンデンサ\n測定: ACライン間ノイズ",
-    "C2": "C2 (330µF)\nバルク平滑\n測定: ④DCバス–GND",
-    "C3": "C3 (1nF)\nスナバC\n測定: スナバノード–GND",
-    "C4": "C4 (100pF)\nブートストラップC\n測定: VCC供給ノード",
-    "C5": "C5 (47µF)\n補助電源平滑\n測定: 制御IC VCC",
-    "C6": "C6 (680µF)\n出力平滑 P1\n測定: ⑪USB Port1 VBUS",
-    "C7": "C7 (680µF)\n出力平滑 P2\n測定: ⑫USB Port2 VBUS",
-    "C8": "C8 (4.7nF)\nYコンデンサ\n測定: ACライン–PE相当",
-}
-for idx, ck in enumerate(C.keys()):
-    ax = fig.add_subplot(gs[4, idx % 4])
-    style_ax(ax, C_titles[ck], "電圧 [V]")
-    y = ds(v_C[ck])
-    ax.plot(ts, y, color=C_cols[idx], lw=1.0)
-    ax.fill_between(ts, y, color=C_cols[idx], alpha=0.11)
-    ax.set_ylim(*data_limits(y, pad=0.18))
-    mark_meas(ax, f"測定点: {ck}")
-    axes_all.append(ax)
+# 3) 抵抗 R7-R12
+ax_r2 = fig.add_subplot(gs[1, 1])
+style_ax(ax_r2, "抵抗群 R7-R12\n測定: 各抵抗両端電圧", "電圧 [V]")
+ax_r2.set_xlim(ts[0], ts[-1])
+ax_r2.set_ylim(*data_limits(*[ds(v_R[k]) for k in ["R7", "R8", "R9", "R10", "R11", "R12"]], pad=0.15))
+for rk, col in zip(["R7", "R8", "R9", "R10", "R11", "R12"], [ROSE, LIME, CORAL, GOLD, TEAL, MINT]):
+    add_anim_line(ax_r2, ts, ds(v_R[rk]), color=col, lw=0.9, label=rk)
+ax_r2.legend(fontsize=6.6, ncol=3, facecolor="#1C2128", labelcolor=WHITE)
 
-# Row 5: C1-C4 電流
-for idx, ck in enumerate(list(C.keys())[:4]):
-    ax = fig.add_subplot(gs[5, idx])
-    style_ax(ax, f"{ck} の充放電電流\n測定: {ck} の電流", "電流 [mA]")
-    y = np.clip(ds(i_C[ck]) * 1000, -500, 500)
-    ax.plot(ts, y, color=C_cols[idx], lw=1.0)
-    ax.fill_between(ts, y, color=C_cols[idx], alpha=0.11)
-    ax.set_ylim(*data_limits(y, pad=0.15))
-    mark_meas(ax, f"測定点: {ck}")
-    axes_all.append(ax)
+# 4) コンデンサ C1-C4
+ax_c1 = fig.add_subplot(gs[2, 0])
+style_ax(ax_c1, "コンデンサ C1-C4\n測定: AC/EMI/スナバ/補助", "電圧 [V]")
+ax_c1.set_xlim(ts[0], ts[-1])
+ax_c1.set_ylim(*data_limits(*[ds(v_C[k]) for k in ["C1", "C2", "C3", "C4"]], pad=0.15))
+for ck, col in zip(["C1", "C2", "C3", "C4"], [CORAL, TEAL, GOLD, MINT]):
+    add_anim_line(ax_c1, ts, ds(v_C[ck]), color=col, lw=0.9, label=ck)
+ax_c1.legend(fontsize=6.6, ncol=2, facecolor="#1C2128", labelcolor=WHITE)
 
-# Row 6: C5-C8 電流
-for idx, ck in enumerate(list(C.keys())[4:]):
-    ax = fig.add_subplot(gs[6, idx])
-    style_ax(ax, f"{ck} の充放電電流\n測定: {ck} の電流", "電流 [mA]")
-    y = np.clip(ds(i_C[ck]) * 1000, -500, 500)
-    ax.plot(ts, y, color=C_cols[idx + 4], lw=1.0)
-    ax.fill_between(ts, y, color=C_cols[idx + 4], alpha=0.11)
-    ax.set_ylim(*data_limits(y, pad=0.15))
-    mark_meas(ax, f"測定点: {ck}")
-    axes_all.append(ax)
+# 5) コンデンサ C5-C8
+ax_c2 = fig.add_subplot(gs[2, 1])
+style_ax(ax_c2, "コンデンサ C5-C8\n測定: 補助/出力/Yコン", "電圧 [V]")
+ax_c2.set_xlim(ts[0], ts[-1])
+ax_c2.set_ylim(*data_limits(*[ds(v_C[k]) for k in ["C5", "C6", "C7", "C8"]], pad=0.15))
+for ck, col in zip(["C5", "C6", "C7", "C8"], [PLUM, SKY, ROSE, LIME]):
+    add_anim_line(ax_c2, ts, ds(v_C[ck]), color=col, lw=0.9, label=ck)
+ax_c2.legend(fontsize=6.6, ncol=2, facecolor="#1C2128", labelcolor=WHITE)
 
-# Row 7: インダクタ
-L_titles = {
-    "L1": "L1 (1mH)\nコモンモードチョーク\n測定: ACライン貫通ノード",
-    "L2": "L2 (470µH)\n差動モードチョーク\n測定: L2両端",
-    "L3": "L3 (10µH)\n出力インダクタ\n測定: D3/D4後–C6前",
-}
-L_cols = [TEAL, CORAL, GOLD]
-for idx, lk in enumerate(L.keys()):
-    ax = fig.add_subplot(gs[7, idx])
-    style_ax(ax, L_titles[lk], "電圧 [V]")
-    y = np.clip(ds(v_L[lk]), -30, 30)
-    ax.plot(ts, y, color=L_cols[idx], lw=1.0)
-    ax.fill_between(ts, y, color=L_cols[idx], alpha=0.11)
-    ax.axhline(0, color=GRAY, lw=0.45, ls="--")
-    ax.set_ylim(*data_limits(y, symmetric=True, pad=0.12))
-    ax2 = ax.twinx()
-    iy = np.clip(ds(i_L[lk]), -5, 5)
-    ax2.plot(ts, iy, color=L_cols[idx], lw=0.8, ls="--", alpha=0.7)
-    ax2.set_ylabel("電流 [A]", color=GRAY, fontsize=6)
-    ax2.tick_params(colors=GRAY, labelsize=6)
-    for sp in ax2.spines.values():
-        sp.set_color(BORDER)
-    mark_meas(ax, f"測定点: {lk}")
-    axes_all.append(ax)
+# 6) インダクタ L1-L3
+ax_l = fig.add_subplot(gs[3, 0])
+style_ax(ax_l, "インダクタ L1-L3\n測定: コイル電圧", "電圧 [V]")
+ax_l.set_xlim(ts[0], ts[-1])
+ax_l.set_ylim(*data_limits(*[ds(v_L[k]) for k in ["L1", "L2", "L3"]], symmetric=True, pad=0.15))
+for lk, col in zip(["L1", "L2", "L3"], [TEAL, CORAL, GOLD]):
+    add_anim_line(ax_l, ts, ds(v_L[lk]), color=col, lw=0.9, label=f"{lk} V")
+ax_l.axhline(0, color=GRAY, lw=0.45, ls="--")
+ax_l.legend(fontsize=6.6, ncol=3, facecolor="#1C2128", labelcolor=WHITE)
 
-ax_lv = fig.add_subplot(gs[7, 3])
-style_ax(ax_lv, "全インダクタの電圧比較", "電圧 [V]")
-for lk, col in zip(L.keys(), L_cols):
-    ax_lv.plot(ts, np.clip(ds(v_L[lk]), -30, 30), lw=0.9, label=lk, color=col)
-ax_lv.axhline(0, color=GRAY, lw=0.45, ls="--")
-ax_lv.legend(fontsize=7, facecolor="#1C2128", labelcolor=WHITE)
-axes_all.append(ax_lv)
+# 7) ダイオード D1-D5
+ax_d = fig.add_subplot(gs[3, 1])
+style_ax(ax_d, "ダイオード D1-D5\n測定: 整流 / 二次整流 / スナバ", "電流 [A]")
+ax_d.set_xlim(ts[0], ts[-1])
+ax_d.set_ylim(*data_limits(*[ds(i_D[k]) for k in ["D1", "D2", "D3", "D4", "D5"]], pad=0.15))
+for dk, col in zip(["D1", "D2", "D3", "D4", "D5"], [MINT, PLUM, SKY, ROSE, LIME]):
+    add_anim_line(ax_d, ts, ds(i_D[dk]), color=col, lw=0.9, label=dk)
+ax_d.legend(fontsize=6.6, ncol=3, facecolor="#1C2128", labelcolor=WHITE)
 
-# Row 8: ダイオード
-D_titles = {
-    "D1": "D1 (0.7V)\n整流ブリッジ 上側\n測定: ブリッジ出力電流",
-    "D2": "D2 (0.7V)\n整流ブリッジ 下側\n測定: ブリッジ出力電流",
-    "D3": "D3 (0.45V)\n二次整流 P1\n測定: ⑩D3電流",
-    "D4": "D4 (0.45V)\n二次整流 P2\n測定: ⑩D4電流",
-}
-D_cols = [MINT, PLUM, SKY, ROSE]
-for idx, dk in enumerate(["D1", "D2", "D3", "D4"]):
-    ax = fig.add_subplot(gs[8, idx])
-    style_ax(ax, D_titles[dk], "電流 [A]")
-    y = ds(i_D[dk])
-    ax.plot(ts, y, color=D_cols[idx], lw=1.0)
-    ax.fill_between(ts, y, color=D_cols[idx], alpha=0.11)
-    ax.set_ylim(*data_limits(y, pad=0.18))
-    ax2 = ax.twinx()
-    ax2.axhline(VF[dk], color=WHITE, lw=0.8, ls=":", alpha=0.65)
-    ax2.set_ylabel(f"VF={VF[dk]}V", color=GRAY, fontsize=6)
-    ax2.tick_params(colors=GRAY, labelsize=6)
-    for sp in ax2.spines.values():
-        sp.set_color(BORDER)
-    mark_meas(ax, f"測定点: {dk}")
-    axes_all.append(ax)
-
-# Row 9: 制御・FB・MOSFET
-ax_d5 = fig.add_subplot(gs[9, 0])
-style_ax(ax_d5, "D5 (5.1V)\nツェナークランプ\n測定: スナバ回路", "電流 [A]")
-y = ds(i_D["D5"])
-ax_d5.plot(ts, y, color=LIME, lw=1.0)
-ax_d5.fill_between(ts, y, color=LIME, alpha=0.11)
-ax_d5.set_ylim(*data_limits(y, pad=0.2))
-ax_d5_2 = ax_d5.twinx()
-ax_d5_2.axhline(VF["D5"], color=WHITE, lw=0.8, ls=":", alpha=0.65)
-ax_d5_2.set_ylabel("Vz=5.1V", color=GRAY, fontsize=6)
-ax_d5_2.tick_params(colors=GRAY, labelsize=6)
-for sp in ax_d5_2.spines.values():
+# 8) 制御IC / MOSFET
+ax_ctrl = fig.add_subplot(gs[4, 0])
+style_ax(ax_ctrl, "制御IC U3 / MOSFET Q1\n測定: Vgs / Vds / PWM Duty", "電圧 [V]")
+ax_ctrl.set_xlim(ts[0], ts[-1])
+ax_ctrl.set_ylim(*data_limits(ds(v_gate), ds(v_drain), pad=0.15))
+add_anim_line(ax_ctrl, ts, ds(v_gate), color=PLUM, lw=1.0, label="Vgs [⑦]")
+add_anim_line(ax_ctrl, ts, ds(v_drain), color=SKY, lw=1.0, label="Vds [⑦]")
+ax_ctrl.legend(fontsize=6.6, facecolor="#1C2128", labelcolor=WHITE)
+ax_ctrl2 = ax_ctrl.twinx()
+ax_ctrl2.set_ylim(0, 100)
+ax_ctrl2.set_ylabel("Duty [%]", color=GRAY, fontsize=6)
+ax_ctrl2.tick_params(colors=GRAY, labelsize=6)
+for sp in ax_ctrl2.spines.values():
     sp.set_color(BORDER)
-axes_all.append(ax_d5)
+add_anim_line(ax_ctrl2, ts, ds(duty) * 100, color=LIME, lw=0.85, ls="--", label="Duty [⑧]")
+mark_meas(ax_ctrl, "⑦⑧")
 
-ax_fb = fig.add_subplot(gs[9, 1])
-style_ax(ax_fb, "FB電圧\n測定: R4/R5分圧点", "電圧 [V]")
-v_fb = ds(v_R["R5"])
-ax_fb.plot(ts, v_fb, color=LIME, lw=1.1)
-ax_fb.axhline(2.5, color=GOLD, lw=0.8, ls="--", alpha=0.75, label="FB基準 2.5V")
-ax_fb.set_ylim(*data_limits(v_fb, pad=0.18))
-ax_fb.legend(fontsize=7, facecolor="#1C2128", labelcolor=WHITE)
-mark_meas(ax_fb, "測定点: ⑨")
-axes_all.append(ax_fb)
+# 9) USB出力
+ax_out = fig.add_subplot(gs[4, 1])
+style_ax(ax_out, "USB-A 出力 P1 / P2\n測定: C6 / C7 両端", "電圧 [V]")
+ax_out.set_xlim(ts[0], ts[-1])
+ax_out.set_ylim(4.3, 5.7)
+add_anim_line(ax_out, ts, ds(v_out1), color=MINT, lw=1.05, label="Port1 [⑪]")
+add_anim_line(ax_out, ts, ds(v_out2), color=ROSE, lw=1.05, label="Port2 [⑫]")
+add_anim_line(ax_out, ts, ds(v_bulk), color=TEAL, lw=0.8, alpha=0.8, label="v_bulk")
+ax_out.axhline(5.0, color=GOLD, lw=0.7, ls="--", label="5.0V")
+ax_out.legend(fontsize=6.6, facecolor="#1C2128", labelcolor=WHITE)
+mark_meas(ax_out, "⑪⑫")
 
-ax_q1v = fig.add_subplot(gs[9, 2])
-style_ax(ax_q1v, "Q1 MOSFET の電圧\n測定: Vgs(ゲート–ソース) / Vds(ドレイン–ソース)", "電圧 [V]")
-ax_q1v.plot(ts, ds(v_gate), color=PLUM, lw=1.0, label="Vgs [ゲート–ソース]")
-ax_q1v.plot(ts, ds(v_drain), color=SKY, lw=1.0, label="Vds [ドレイン–ソース]", alpha=0.9)
-ax_q1v.set_ylim(*data_limits(ds(v_gate), ds(v_drain), pad=0.16))
-ax_q1v.legend(fontsize=7, facecolor="#1C2128", labelcolor=WHITE)
-mark_meas(ax_q1v, "測定点: ⑦")
-axes_all.append(ax_q1v)
-
-ax_q1i = fig.add_subplot(gs[9, 3])
-style_ax(ax_q1i, "Q1 ドレイン電流\n測定: T1一次巻線–Q1ドレイン間", "電流 [A]")
-y = ds(i_primary * sw_signal)
-ax_q1i.plot(ts, y, color=CORAL, lw=1.0)
-ax_q1i.fill_between(ts, y, color=CORAL, alpha=0.11)
-ax_q1i.set_ylim(*data_limits(y, pad=0.18))
-mark_meas(ax_q1i, "測定点: ⑤")
-axes_all.append(ax_q1i)
-
-# Row 10: トランス / NTC / スナバ
-ax_t1 = fig.add_subplot(gs[10, :2])
-style_ax(ax_t1, "トランス T1\n一次電流(⑤) / 二次電圧(⑥)", "一次電流 [A]")
-ax_t1.plot(ts, ds(i_primary), color=TEAL, lw=1.1, label="一次電流 [A]")
-ax_t1.fill_between(ts, ds(i_primary), color=TEAL, alpha=0.11)
-ax2_t1 = ax_t1.twinx()
-ax2_t1.plot(ts, ds(v_sec_raw), color=GOLD, lw=1.0, ls="--", alpha=0.85, label="二次側電圧 [V]")
-ax2_t1.set_ylabel("二次電圧 [V]", color=GOLD, fontsize=7)
-ax2_t1.tick_params(colors=GOLD, labelsize=7)
-for sp in ax2_t1.spines.values():
-    sp.set_color(BORDER)
-ax_t1.set_ylim(*data_limits(ds(i_primary), pad=0.16))
-ax2_t1.set_ylim(*data_limits(ds(v_sec_raw), pad=0.16))
-ax_t1.legend(fontsize=7, facecolor="#1C2128", labelcolor=WHITE, loc="upper left")
-ax2_t1.legend(fontsize=7, facecolor="#1C2128", labelcolor=WHITE, loc="upper right")
-mark_meas(ax_t1, "測定点: ⑤ / ⑥")
-axes_all.append(ax_t1)
-
-ax_ntc = fig.add_subplot(gs[10, 2])
-style_ax(ax_ntc, "NTCサーミスタ R3\n抵抗値と温度", "抵抗 [Ω]")
-ax_ntc.plot(ts, ds(R_ntc), color=CORAL, lw=1.1)
-ax_ntc.set_ylim(*data_limits(ds(R_ntc), pad=0.16))
+# 10) NTC / FB
+ax_ntc = fig.add_subplot(gs[5, 0])
+style_ax(ax_ntc, "NTCサーミスタ R3 / FB電圧\n測定: 抵抗値 / 分圧点", "抵抗 [Ω]")
+ax_ntc.set_xlim(ts[0], ts[-1])
+ax_ntc.set_ylim(*data_limits(ds(R_ntc), pad=0.15))
+add_anim_line(ax_ntc, ts, ds(R_ntc), color=CORAL, lw=1.0, label="R_ntc")
 ax_ntc2 = ax_ntc.twinx()
-ax_ntc2.plot(ts, ds(T_ntc), color=GOLD, lw=0.9, ls="--", alpha=0.8)
-ax_ntc2.set_ylabel("温度 [°C]", color=GOLD, fontsize=7)
-ax_ntc2.tick_params(colors=GOLD, labelsize=7)
+ax_ntc2.set_ylim(*data_limits(ds(v_fb), pad=0.15))
+ax_ntc2.set_ylabel("電圧 [V]", color=GOLD, fontsize=6)
+ax_ntc2.tick_params(colors=GOLD, labelsize=6)
 for sp in ax_ntc2.spines.values():
     sp.set_color(BORDER)
-mark_meas(ax_ntc, "測定点: ①")
-axes_all.append(ax_ntc)
+add_anim_line(ax_ntc2, ts, ds(v_fb), color=GOLD, lw=0.9, ls="--", label="FB [⑨]")
+mark_meas(ax_ntc, "①⑨")
 
-ax_snb = fig.add_subplot(gs[10, 3])
-style_ax(ax_snb, "スナバ回路\nR10 + C3 + D5", "電圧 [V]")
-ax_snb.plot(ts, ds(v_C["C3"]), color=LIME, lw=1.0, label="C3電圧")
-ax_snb.plot(ts, ds(v_R["R10"]), color=CORAL, lw=1.0, label="R10電圧", alpha=0.85)
-ax_snb.axhline(VF["D5"], color=PLUM, lw=0.8, ls=":", label="D5 Vz")
-ax_snb.set_ylim(*data_limits(ds(v_C["C3"]), ds(v_R["R10"]), pad=0.2))
-ax_snb.legend(fontsize=7, facecolor="#1C2128", labelcolor=WHITE)
-axes_all.append(ax_snb)
-
-# Row 11: USB出力 / 効率 / 電力フロー
-ax_p1 = fig.add_subplot(gs[11, 0])
-style_ax(ax_p1, "USB-A Port1 出力電圧\n測定: ⑪ C6両端 / VBUS–GND", "電圧 [V]", xlabel="時間 [ms]", show_xlabels=True)
-ax_p1.plot(ts, ds(v_out1), color=MINT, lw=1.2)
-ax_p1.axhline(5.0, color=GOLD, lw=0.8, ls="--", label="5.0V")
-ax_p1.axhline(4.75, color=CORAL, lw=0.6, ls=":", label="4.75V下限", alpha=0.8)
-ax_p1.set_ylim(4.3, 5.7)
-ax_p1.legend(fontsize=7, facecolor="#1C2128", labelcolor=WHITE)
-mark_meas(ax_p1, "測定点: ⑪")
-axes_all.append(ax_p1)
-
-ax_p2 = fig.add_subplot(gs[11, 1])
-style_ax(ax_p2, "USB-A Port2 出力電圧\n測定: ⑫ C7両端 / VBUS–GND", "電圧 [V]", xlabel="時間 [ms]", show_xlabels=True)
-ax_p2.plot(ts, ds(v_out2), color=ROSE, lw=1.2)
-ax_p2.axhline(5.0, color=GOLD, lw=0.8, ls="--", label="5.0V")
-ax_p2.axhline(4.75, color=CORAL, lw=0.6, ls=":", label="4.75V下限", alpha=0.8)
-ax_p2.set_ylim(4.3, 5.7)
-ax_p2.legend(fontsize=7, facecolor="#1C2128", labelcolor=WHITE)
-mark_meas(ax_p2, "測定点: ⑫")
-axes_all.append(ax_p2)
-
+# 11) 効率
+ax_eff = fig.add_subplot(gs[5, 1])
+style_ax(ax_eff, "変換効率 推定", "効率 [%]")
 p_in = v_ac * (v_ac / (R["R1"] + R["R2"])) + i_primary * v_bulk
-p_in_avg = np.convolve(p_in, np.ones(5000) / 5000, mode="same")
+p_in_avg = np.convolve(p_in, np.ones(2500) / 2500, mode="same")
 eta = np.clip((V_OUT * I_LOAD) / np.where(p_in_avg > 0.1, p_in_avg, 1.0), 0, 1) * 100
-
-ax_eff = fig.add_subplot(gs[11, 2])
-style_ax(ax_eff, "変換効率 推定\nPout / Pin", "効率 [%]", xlabel="時間 [ms]", show_xlabels=True)
-ax_eff.plot(ts, ds(eta), color=LIME, lw=1.2)
-ax_eff.axhline(80, color=GOLD, lw=0.8, ls="--", label="80%目安")
+ax_eff.set_xlim(ts[0], ts[-1])
 ax_eff.set_ylim(0, 110)
-ax_eff.legend(fontsize=7, facecolor="#1C2128", labelcolor=WHITE)
-axes_all.append(ax_eff)
+add_anim_line(ax_eff, ts, ds(eta), color=LIME, lw=1.05, label="Efficiency")
+ax_eff.axhline(80, color=GOLD, lw=0.7, ls="--", label="80%")
+ax_eff.legend(fontsize=6.6, facecolor="#1C2128", labelcolor=WHITE)
 
-ax_pwr = fig.add_subplot(gs[11, 3])
-style_ax(ax_pwr, "定常状態の電力フロー [W]", "", xlabel="種類", show_xlabels=True)
-labels = ["AC入力", "EMIロス", "整流ロス", "FET損", "トランス", "USB出力"]
-values = [V_AC * 0.22, 0.5, 2.0, 1.5, 0.8, V_OUT * I_LOAD]
-colors_bar = [CORAL, TEAL, GOLD, PLUM, SKY, MINT]
-bars = ax_pwr.barh(labels, values, color=colors_bar, edgecolor=BORDER, height=0.6)
-ax_pwr.set_xlabel("電力 [W]", color=WHITE, fontsize=6.8)
-ax_pwr.tick_params(colors=WHITE, labelsize=6.5)
-for sp in ax_pwr.spines.values():
-    sp.set_color(BORDER)
-for bar, val in zip(bars, values):
-    ax_pwr.text(bar.get_width() + 0.08, bar.get_y() + bar.get_height() / 2,
-                f"{val:.1f}W", va="center", color=WHITE, fontsize=7)
-axes_all.append(ax_pwr)
-
-# ============================================================
-# アニメーション
-# ============================================================
-cursor_lines = []
-for ax in axes_all:
-    cursor_lines.append(ax.axvline(ts[0], color=WHITE, lw=0.7, alpha=0.28))
-
+# 右上の時間表示は、タイトルと重ならないよう少し下へ
 time_text = fig.text(
-    0.94, 0.985, "", color=WHITE, ha="right", va="top", fontsize=12,
+    0.985, 0.952, "", color=WHITE, ha="right", va="top", fontsize=12,
     bbox=dict(facecolor="#1C2128", edgecolor=BORDER, boxstyle="round,pad=0.25")
 )
 
+# アニメーション更新
 def update(frame):
-    x = ts[frame]
-    for c in cursor_lines:
-        c.set_xdata([x, x])
-    time_text.set_text(f"{x:.2f} ms")
-    return cursor_lines + [time_text]
+    n = frame + 1
+    x_now = ts[frame]
+    for line, x, y in animated:
+        line.set_data(x[:n], y[:n])
+    time_text.set_text(f"{x_now:.2f} ms")
+    return [item[0] for item in animated] + [time_text]
 
-ani = FuncAnimation(fig, update, frames=len(ts), interval=30, blit=False, repeat=True)
+# フレーム数を多めにして、波形が見えるようにする
+frames = np.arange(4, len(ts), max(1, len(ts) // 140)).astype(int)
+ani = FuncAnimation(fig, update, frames=frames, interval=35, blit=False, repeat=True)
 
-# ============================================================
-# 保存と表示
-# ============================================================
-fig.savefig(OUT_PNG, dpi=140, bbox_inches="tight", facecolor=BG)
+# ★ 最後のフレームを描画（これを追加！）
+last_frame = len(ts) - 1
+update(last_frame)
 
+# 初期静止画像保存
+fig.savefig(OUT_PNG, dpi=120, bbox_inches="tight", facecolor=BG)
+
+# GIF保存
 if SAVE_GIF:
     try:
-        from matplotlib.animation import PillowWriter
-        ani.save(OUT_GIF, writer=PillowWriter(fps=30))
+        ani.save(OUT_GIF, writer=PillowWriter(fps=12), dpi=80)
         print(f"GIF saved: {OUT_GIF}")
     except Exception as e:
         print(f"GIF保存に失敗: {e}")
@@ -757,5 +659,5 @@ if SAVE_GIF:
 print(f"回路図 saved: {OUT_CKT}")
 print(f"静止画 saved: {OUT_PNG}")
 
-fig.tight_layout(rect=[0, 0, 1, 0.988])
+fig.tight_layout(rect=[0, 0, 1, 0.94])
 plt.show()
